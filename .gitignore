@@ -1,0 +1,52 @@
+# Virtual environments
+.venv-polyllm/
+.venv/
+venv/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# Environment / secrets
+.env
+.env.*
+
+# Logs
+*.log
+
+# Data directories (raw, interim, processed, generated)
+data/raw/
+data/interim/
+data/processed/
+outputs/
+models/
+checkpoints/
+cache/
+.cache/
+
+# Generated data and model files
+*.csv
+*.csv.gz
+*.tsv
+*.parquet
+*.jsonl
+*.zip
+*.gz
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.bin
+
+# Keep documentation and placeholder files even inside ignored data dirs
+!data/README.md
+!data/**/README.md
+!data/**/.gitkeep
