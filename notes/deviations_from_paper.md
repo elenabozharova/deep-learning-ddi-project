@@ -11,6 +11,48 @@ This document separates deviations into three categories:
 
 ---
 
+## 0. Confirmed Matches to Paper-Specified Design
+
+### 0.1 Multi-hot label vector
+
+| Property | Paper | Reproduction |
+|---|---|---|
+| Label representation | Binary vector per drug pair, one element per side effect | `numpy.uint8` array, shape `(n_pairs, n_labels)`, one row per pair |
+| Vector size | 964 | 963 (see §1.1) |
+
+**Evidence:**
+Paper (quoted by user, exact section number not yet located): "we construct a binary vector of size 964 for each drug pair, where each element in the vector indicates the presence (1) or absence (0) of a specific side effect... This transformation enables efficient handling of the multi-label classification problem."
+Reproduction: `build_label_matrix()`, `src/polyllm/data/prepare_multilabel_dataset.py:407`; output `data/processed/polyllm_labels.npy`.
+
+**Assessment:** Confirmed match, not a deviation — the reproduction's multi-hot design directly implements what the paper specifies. The only difference is vector length (963 vs 964), already covered as a confirmed deviation in §1.1.
+
+---
+
+### 0.2 Pair embedding fusion strategy (element-wise sum)
+
+| Property | Paper | Reproduction |
+|---|---|---|
+| Fusion method selected | Summation (chosen after evaluating four strategies; concatenation performed similarly but summation was more computationally efficient) | Summation only |
+| Formula | `pair = drug_1 + drug_2` (element-wise) | Same: `pair_matrix = drug_matrix[drug1_indices] + drug_matrix[drug2_indices]` |
+
+**Evidence:**
+Paper (quoted by user): "we evaluate four distinct strategies to obtain a comprehensive representation for each drug pair. Our experiments showed that both concatenation and summation yielded similar performance. However, to optimize computational efficiency, we selected summation as our fusion method... we sum the embeddings of the two interacting drugs to produce a unified vector representation for each drug pair."
+Reproduction: `build_pair_matrix()`, `src/polyllm/features/build_pair_embeddings.py:137-155`; commutativity independently verified via `verify_symmetry()` (line 162), `notes/pair_embedding_findings.md` §4.
+
+**Assessment:** Confirmed match on the final method and its outcome. Not reproduced: the paper's own ablation across all four strategies — this reproduction adopted summation directly as a fixed design choice rather than independently comparing it against alternatives.
+
+**Future scope — candidate alternative fusion strategies not yet implemented:**
+The paper names only two of its four evaluated strategies explicitly (concatenation, summation). `notes/pair_embedding_findings.md` §10 independently flagged three unexplored alternatives, before this paper quote was available:
+- **Difference** — element-wise subtraction, `drug_1 - drug_2`
+- **Concatenation** — `[drug_1 ; drug_2]`, doubling dimensionality to 768
+- **Hadamard product** — element-wise multiplication, `drug_1 * drug_2`
+
+These three are the standard remaining members of the classic four-way vector-pair combination set used widely in sentence-pair NLP literature, and are plausible candidates for the paper's other two unnamed strategies. Implementing and comparing all three against the current sum-based pipeline would be a natural future extension to more fully reproduce the paper's fusion-method ablation, and could also be re-run against the Morgan fingerprint pipeline for a fuller Milestone 8 comparison.
+
+**Status:** Not implemented. Flagged as future scope, not a current deviation requiring correction.
+
+---
+
 ## 1. Confirmed Deviations
 
 ### 1.1 Label count: 963 vs 964
@@ -87,15 +129,57 @@ Reproduction: `notes/morgan_baseline_findings.md`, `outputs/baseline/morgan/test
 
 ---
 
+### 1.6 Only one embedding backbone reproduced; paper's broader model comparison out of scope
+
+| Property | Paper | Reproduction |
+|---|---|---|
+| Embedding backbones evaluated | BERT, Sentence-BERT (Reimers and Gurevych, 2019), fine-tuned ChemBERTa (Xu et al., 2023), OpenAI GPT, Mol2vec (Jaeger et al., 2018), Doc2vec (Le and Mikolov, 2014) — at least these six, in addition to whatever produces the "DeepChem ChemBERTa" row in Table 5 | One: frozen `DeepChem/ChemBERTa-77M-MLM` only |
+
+**Evidence:**  
+Paper (quoted by user, exact section not yet located): "BERT, Sentence-BERT (SBERT) Reimers and Gurevych (2019), Fine-tuned ChemBERTa Xu et al. (2023), OpenAI's GPT, Mol2vec Jaeger et al. (2018), and Doc2vec Le and Mikolov (2014)."
+
+Paper : "Mol2vec... produces substructure based embeddings that emphasize local chemical environments. Additionally, we use the Application Programming Interface (API) provided by OpenAI to encode drug representations using their advanced and most powerful third-generation embedding model. The text-embedding-3-small version, with an embedding dimension..." [quote truncated by user].
+
+Paper: "we employ a fine-tuned variant of ChemBERTa developed by Xu et al. (2023), which uses SimCSE, a contrastive learning approach. This fine-tuning process is conducted using the GuacaMol benchmark dataset Brown et al. (2019)... with dropout introduced as noise to further enhance embedding quality." This confirms "Fine-tuned ChemBERTa" is not the paper's own in-house fine-tuning of the base checkpoint — it is a separately published encoder (Xu et al., 2023) trained via SimCSE contrastive learning on GuacaMol, structurally unrelated to this reproduction's plain frozen encoder.
+
+Reproduction: confirmed by exhaustive search — no reference to `SBERT`, `Sentence-BERT`, `Mol2vec`, `Doc2vec`, `GPT`, `sentence_transformers`, `openai`, or `text-embedding-3` anywhere in `src/`. Only encoder implemented: `src/polyllm/features/generate_chemberta_embeddings.py`, targeting the frozen `DeepChem/ChemBERTa-77M-MLM` checkpoint (see §2.1).
+
+**Consequence:** The reproduction cannot speak to how the paper's chosen encoder (whichever produces the Table 5 "DeepChem ChemBERTa" number) compares against the other encoders the paper evaluated. Our single implemented model does not correspond to any of the six listed alternatives — it most likely targets the paper's separate, primary "DeepChem ChemBERTa" configuration instead (see §2.1, now largely corroborated by the paper's own description of that base checkpoint).
+
+**Classification:** Confirmed scope limitation — not a bug, a deliberate reduction of the paper's full comparison to a single backbone (consistent with `notes/polyllm_reproduction_scope.md`'s single-embedding-model plan).
+
+---
+
+### 1.7 LeakyReLU negative slope: 0.1 (paper) vs 0.01 (reproduction)
+
+| Property | Paper | Reproduction |
+|---|---|---|
+| Activation function | Leaky ReLU (Xu et al., 2015) | Leaky ReLU (`torch.nn.LeakyReLU`) |
+| Negative slope | **0.1** | **0.01** |
+
+**Evidence:**  
+Paper (quoted by user): "we evaluated several activation functions and selected the Leaky Rectified Linear Unit (Leaky ReLU) Xu et al. (2015) with a negative slope of 0.1 for each hidden layer. Leaky ReLU was selected for its ability to address the vanishing gradient problem... and also for its capacity to enhance learning stability."  
+Reproduction: `src/polyllm/models/mlp.py:25`, `NEGATIVE_SLOPE: float = 0.01  # PyTorch LeakyReLU default`; threaded through both training configs unchanged — `train_morgan_baseline.py:83` and `train_chemberta_mlp.py:90`, `"leaky_relu_negative_slope": 0.01,   # PyTorch default for LeakyReLU`.
+
+**Root cause:** The reproduction adopted PyTorch's own out-of-the-box default for `nn.LeakyReLU` (0.01) rather than a value derived from the paper — confirmed by the code comments crediting "PyTorch default," not the paper, as the source of this number. The paper's specific value (0.1) was not known at the time this code was written.
+
+**Consequence:** A 10× difference in how much negative-input signal each hidden-layer neuron passes through during both the forward pass and backpropagation. The paper's stated rationale (mitigating vanishing gradients, improving learning stability) is only partially realized at 0.01 versus 0.1. Effect on final metrics is unquantified without retraining — same caveat as other hyperparameter deviations in this document.
+
+**Evidence reference:** `src/polyllm/models/mlp.py`; `outputs/polyllm/chemberta/training_config.json` and `outputs/baseline/morgan/training_config.json` (both record `leaky_relu_negative_slope: 0.01`).
+
+---
+
 ## 2. Possible Deviations (Unconfirmed)
 
 ### 2.1 ChemBERTa model revision
 
-**Claim:** The paper uses `DeepChem/ChemBERTa-77M-MLM` from Hugging Face. The reproduction uses the same model at a specific revision (`ed8a5374f2024ec8da53760af91a33fb8f6a15ff`).
+**Confirmed:** The paper's base checkpoint name matches the reproduction's. Paper (quoted by user): "we use the ChemBERTa model pre-trained on the Masked Language Modeling (MLM) task using a dataset size of 77 million samples (ChemBERTa-77M-MLM)." Reproduction: `DeepChem/ChemBERTa-77M-MLM`, `notes/chemberta_embedding_findings.md:26`. Exact name, pretraining objective (MLM), and dataset size (77M) all match.
 
-**Why unconfirmed:** The paper does not specify a revision hash. If the paper used a different commit, the model weights differ. The small AUROC agreement (+0.0022) makes a major weights difference unlikely but cannot be ruled out.
+**Still unconfirmed — exact revision hash:** The reproduction pins Hugging Face revision `ed8a5374f2024ec8da53760af91a33fb8f6a15ff` (SHA resolved via `huggingface_hub.model_info()`). The paper does not specify a revision hash, so if the checkpoint was updated on the Hub after the paper was written, weights could differ slightly. The small AUROC agreement (+0.0022) makes a major weights difference unlikely but cannot be ruled out.
 
-**Evidence reference:** `notes/chemberta_embedding_findings.md`.
+**Largely corroborated — frozen vs. fine-tuned regime:** The paper's own text distinguishes the base `ChemBERTa-77M-MLM` ("we use...") from a separately-described "fine-tuned variant of ChemBERTa developed by Xu et al. (2023)" trained via SimCSE on GuacaMol (see §1.6) — implying the base checkpoint is used directly (consistent with this reproduction's frozen-encoder approach) while the SimCSE-fine-tuned version is a distinct, separately-evaluated alternative. The paper never uses the word "frozen" explicitly, so this remains an inference rather than a direct confirmation, but it is now better supported than before.
+
+**Evidence reference:** `notes/chemberta_embedding_findings.md`; §1.6 of this document.
 
 ---
 
@@ -114,6 +198,8 @@ Reproduction: `notes/morgan_baseline_findings.md`, `outputs/baseline/morgan/test
 **Claim:** The reproduction uses Adam, lr=0.001, batch=256, max_epochs=100, patience=10.
 
 **Why unconfirmed:** The paper does not specify the optimizer, learning rate, batch size, or early-stopping configuration for the MLP. These choices are standard but the paper does not confirm them.
+
+**Note:** The activation function and its negative-slope parameter, previously bundled into this general "unspecified hyperparameters" claim, are now confirmed and moved to their own entry — see §1.7 (confirmed 0.1 vs 0.01 mismatch).
 
 **Evidence reference:** `outputs/polyllm/chemberta/training_config.json`.
 
