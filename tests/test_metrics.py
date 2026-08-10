@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from polyllm.metrics import (
     apply_threshold,
+    average_precision_at_k_multi_label,
     macro_auprc,
     macro_auroc,
     macro_f1,
@@ -290,3 +291,71 @@ class TestPerLabelAlignment:
         pred = apply_threshold(y_score, 0.5)
         expected = np.array([0, 1, 1, 0], dtype=np.int32)
         np.testing.assert_array_equal(pred, expected)
+
+
+# ---------------------------------------------------------------------------
+# Scenario 25 — Paper author's per-label AP@k (average_precision_at_k_multi_label)
+# ---------------------------------------------------------------------------
+
+class TestAveragePrecisionAtKMultiLabel:
+    def test_manual_single_label_case(self):
+        # 4 pairs, 1 label, k=3.
+        # true=[1,0,1,0], scores=[0.9,0.8,0.3,0.1]
+        # Ranked by score desc: idx0(true=1), idx1(true=0), idx2(true=1), idx3(true=0)
+        # top-3 = idx0,1,2 -> truth=[1,0,1], score=[0.9,0.8,0.3]
+        # rank1: true=1 -> precision=1/1=1.0   (recall 0->0.5)
+        # rank2: true=0 -> precision=1/2=0.5   (recall unchanged)
+        # rank3: true=1 -> precision=2/3       (recall 0.5->1.0)
+        # AP = 1.0*0.5 + (2/3)*0.5 = 5/6
+        y_true  = np.array([[1], [0], [1], [0]], dtype=np.float32)
+        y_score = np.array([[0.9], [0.8], [0.3], [0.1]], dtype=np.float32)
+        res = average_precision_at_k_multi_label(y_true, y_score, k=3)
+        assert res["mean_ap_at_k"] == pytest.approx(5 / 6, abs=1e-6)
+        assert res["per_label_ap_at_k"].shape == (1,)
+        assert res["per_label_ap_at_k"][0] == pytest.approx(5 / 6, abs=1e-6)
+
+    def test_loops_over_labels_not_pairs(self):
+        # Regression guard for the axis this function must use: n_labels
+        # iterations (columns), not n_pairs (rows). With more pairs than
+        # labels, per_label_ap_at_k must have length == n_labels.
+        y_true  = _ones_zeros(20, 3)
+        y_score = _scores(20, 3)
+        res = average_precision_at_k_multi_label(y_true, y_score, k=5)
+        assert res["n_labels"] == 3
+        assert res["per_label_ap_at_k"].shape == (3,)
+
+    def test_all_positive_top_k_returns_one(self):
+        # Label 0: every one of the top-k rows is a true positive -> AP = 1.0
+        y_true  = np.array([[1], [1], [1], [0]], dtype=np.float32)
+        y_score = np.array([[0.9], [0.8], [0.7], [0.6]], dtype=np.float32)
+        res = average_precision_at_k_multi_label(y_true, y_score, k=3)
+        assert res["mean_ap_at_k"] == pytest.approx(1.0)
+        assert res["degenerate_all_positive_labels"] == 1
+        assert res["degenerate_all_negative_labels"] == 0
+
+    def test_all_negative_top_k_returns_zero(self):
+        # Label 0: every one of the top-k rows is a true negative -> AP = 0.0
+        y_true  = np.array([[0], [0], [0], [1]], dtype=np.float32)
+        y_score = np.array([[0.9], [0.8], [0.7], [0.1]], dtype=np.float32)
+        res = average_precision_at_k_multi_label(y_true, y_score, k=3)
+        assert res["mean_ap_at_k"] == pytest.approx(0.0)
+        assert res["degenerate_all_positive_labels"] == 0
+        assert res["degenerate_all_negative_labels"] == 1
+
+    def test_k_larger_than_n_pairs_uses_all_rows(self):
+        y_true  = _ones_zeros(4, 2)
+        y_score = _scores(4, 2)
+        res = average_precision_at_k_multi_label(y_true, y_score, k=100)
+        assert res["k"] == 100
+        assert res["per_label_ap_at_k"].shape == (2,)
+
+    def test_differs_from_sample_mean_ap_at_50_on_asymmetric_data(self):
+        # Construct data where the per-pair-axis metric and the per-label-axis
+        # metric provably disagree, confirming the two functions are not
+        # interchangeable (the axis-mismatch this function was added to fix).
+        rng = np.random.default_rng(3)
+        y_true  = rng.integers(0, 2, size=(30, 6)).astype(np.float32)
+        y_score = rng.random(size=(30, 6)).astype(np.float32)
+        per_pair_axis  = sample_mean_ap_at_50(y_true, y_score)
+        per_label_axis = average_precision_at_k_multi_label(y_true, y_score, k=10)["mean_ap_at_k"]
+        assert per_pair_axis != pytest.approx(per_label_axis, abs=1e-9)

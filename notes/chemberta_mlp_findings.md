@@ -3,6 +3,8 @@
 **Date:** 2026-06-30  
 **Status:** Complete — ready for review
 
+**2026-08-09 update:** this document's numbers (checkpoint/prediction hashes, best epoch 99, val macro AUPRC 0.4519, test metrics) describe the *original* run trained with LeakyReLU negative_slope=0.01 (PyTorch's default). That run was superseded 2026-08-09 (Milestone 9c) by a retrain under the paper-specified slope=0.1 (best epoch 99, val macro AUPRC 0.4381) — see `notes/deviations_from_paper.md` §1.7 for the full before/after comparison, including why the AUPRC/AP@50 gap to the paper narrowed. The original slope=0.01 artifacts described below are archived at `outputs/polyllm/chemberta_slope0.01_backup/`; this file is left as-is as the historical record of that run.
+
 ---
 
 ## 1. Purpose

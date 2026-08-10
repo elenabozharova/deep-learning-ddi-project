@@ -7,6 +7,8 @@ and report included/skipped counts rather than silently replacing NaN with 0.
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 
@@ -191,3 +193,78 @@ def sample_mean_ap_at_50(
         ap_values[i] = (precision_at_k * top_true).sum() / min(n_true, 50)
 
     return float(ap_values.mean())
+
+
+# ---------------------------------------------------------------------------
+# AP@k — paper author's exact per-label semantics
+# ---------------------------------------------------------------------------
+
+def average_precision_at_k_multi_label(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    k: int = 50,
+) -> dict:
+    """Per-label AP@k, matching the PolyLLM paper author's reference snippet
+    verbatim (translated from pandas ``.iloc`` row selection to numpy row
+    indexing — both are positional, so the translation is exact, not
+    approximate, given y_true and y_pred share row order):
+
+        for i in range(y_true.shape[1]):
+            sorted_indices = np.argsort(y_pred[:, i])[::-1][:k]
+            sorted_true = y_true.iloc[sorted_indices, i]
+            ap_at_k_label = average_precision_score(sorted_true, y_pred[sorted_indices, i])
+            ap_at_k_list.append(ap_at_k_label)
+        return np.mean(ap_at_k_list)
+
+    This ranks over the opposite axis from sample_mean_ap_at_50() above: it
+    loops over LABELS and, for each label, ranks all PAIRS by that label's
+    score, keeping the top k pairs. sample_mean_ap_at_50() loops over pairs
+    and ranks labels within each pair. The two are not interchangeable —
+    see notes/deviations_from_paper.md Sec 1.3 for the reproduction history
+    of this discrepancy (repro originally implemented the per-pair axis;
+    the paper's reference code, given here, uses the per-label axis).
+
+    Degenerate top-k columns (all k selected rows share one class) are not
+    filtered out — sklearn's average_precision_score is called on them as
+    given, matching the author's snippet exactly: an all-positive top-k
+    column returns 1.0, an all-negative top-k column returns 0.0 (both
+    verified against this sklearn version directly). Counts of each are
+    returned for diagnostic purposes only; they do not alter the mean.
+
+    Returns a dict (richer than the author's bare float return, for
+    consistency with the other aggregate metrics in this module):
+        mean_ap_at_k                 - float, the paper-semantics AP@k
+        k                            - the k used
+        n_labels                     - number of label columns
+        per_label_ap_at_k            - (n_labels,) float array
+        degenerate_all_positive_labels - int, top-k columns with no negatives
+        degenerate_all_negative_labels - int, top-k columns with no positives
+    """
+    n_labels = y_true.shape[1]
+    per_label = np.empty(n_labels, dtype=np.float64)
+    degenerate_all_positive = 0
+    degenerate_all_negative = 0
+
+    for i in range(n_labels):
+        top_k_idx = np.argsort(y_pred[:, i])[::-1][:k]
+        top_k_true = y_true[top_k_idx, i]
+        top_k_score = y_pred[top_k_idx, i]
+
+        n_pos = int(top_k_true.sum())
+        if n_pos == len(top_k_true):
+            degenerate_all_positive += 1
+        elif n_pos == 0:
+            degenerate_all_negative += 1
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            per_label[i] = average_precision_score(top_k_true, top_k_score)
+
+    return {
+        "mean_ap_at_k": float(per_label.mean()),
+        "k": k,
+        "n_labels": n_labels,
+        "per_label_ap_at_k": per_label,
+        "degenerate_all_positive_labels": degenerate_all_positive,
+        "degenerate_all_negative_labels": degenerate_all_negative,
+    }

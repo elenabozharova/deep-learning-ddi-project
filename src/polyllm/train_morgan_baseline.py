@@ -80,7 +80,7 @@ DEFAULT_CONFIG: dict = {
     "min_delta":                0.0001,
     "model_selection_metric":   "validation_macro_auprc",
     "dropout":                  0.2,
-    "leaky_relu_negative_slope": 0.01,   # PyTorch default for LeakyReLU
+    "leaky_relu_negative_slope": 0.1,    # PolyLLM paper Sec 2.2 (was 0.01, PyTorch default, until 2026-08-08)
     "num_workers":              0,        # reliable on Windows
     "input_dim":                2048,
     "output_dim":               963,

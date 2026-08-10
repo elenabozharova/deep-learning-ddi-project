@@ -87,7 +87,7 @@ DEFAULT_CONFIG: dict = {
     "min_delta":                0.0001,
     "model_selection_metric":   "validation_macro_auprc",
     "dropout":                  0.2,
-    "leaky_relu_negative_slope": 0.01,
+    "leaky_relu_negative_slope": 0.1,    # PolyLLM paper Sec 2.2 (was 0.01, PyTorch default, until 2026-08-08)
     "num_workers":              0,
     "input_dim":                384,   # ChemBERTa hidden dim (Milestone 4)
     "output_dim":               963,

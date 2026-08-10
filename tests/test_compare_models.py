@@ -516,16 +516,27 @@ class TestNoTrainingCodeInvoked(unittest.TestCase):
 # Scenario 18: Source artifacts remain unchanged
 # ─────────────────────────────────────────────────────────────────────────────
 class TestSourceArtifactsUnchanged(unittest.TestCase):
+    """Regression guard against ACCIDENTAL artifact drift.
+
+    Updated 2026-08-09 (Milestone 9c) after an INTENTIONAL, documented
+    retrain that corrected the LeakyReLU negative slope from 0.01 to the
+    paper-specified 0.1 (notes/deviations_from_paper.md Sec 1.7). The
+    pre-retrain artifacts these hashes previously pinned are archived at
+    outputs/baseline/morgan_slope0.01_backup/ and
+    outputs/polyllm/chemberta_slope0.01_backup/, with their hashes recorded
+    in outputs/comparison/paper_comparison_audit.json
+    (reproduction_artifacts.slope0.01_archived_hashes) for history.
+    """
 
     EXPECTED_HASHES = {
         "outputs/baseline/morgan/checkpoints/best_model.pt":
-            "69666e3a5da0749c713da233d6730109a445aeee221b1919de121c492dc625b5",
+            "66669b612a33b59c6efe5eb9770970ff042dc171fef427ee5b076fd60b777a08",
         "outputs/baseline/morgan/test_predictions.npz":
-            "3c3ce71f135c5877e0d9c0b0a6f083c55d2b4b8b23752e9fa522683ff38ff773",
+            "df2d58b90745eca539f9789c210c544685c0821673b734a3e6a6eb5f4c6fd0b8",
         "outputs/polyllm/chemberta/checkpoints/best_model.pt":
-            "742f0f014f7c199111528692d0d42bc7ddb298f87b7568165c1060344c765625",
+            "57daba681f2fd89fd5c522917ae32536e4bb686f8b83319fc3f68514e448b3c8",
         "outputs/polyllm/chemberta/test_predictions.npz":
-            "15e89aec16f88836137643f147c7871c857a22599c4f2689c4929f6f69b472b9",
+            "33c406801938551de8a8151420c54524dfb1bd256724c938314f22397b6dd3c9",
     }
 
     def test_source_artifacts_sha256(self):

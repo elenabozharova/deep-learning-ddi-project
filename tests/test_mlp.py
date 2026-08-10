@@ -160,3 +160,31 @@ class TestBCELoss:
         # Rough sanity: must be in the millions
         assert n > 5_000_000, f"Parameter count {n} seems too low"
         assert n < 10_000_000, f"Parameter count {n} seems too high"
+
+
+# ---------------------------------------------------------------------------
+# Scenario 7 — LeakyReLU negative slope matches PolyLLM paper Sec 2.2
+# ---------------------------------------------------------------------------
+
+class TestActivationSlopeMatchesPaper:
+    def test_default_slope_is_paper_value(self):
+        # PolyLLM paper Sec 2.2: "Leaky ReLU ... with a negative slope of
+        # 0.1 for each hidden layer." Was 0.01 (PyTorch's own default)
+        # until this was corrected on 2026-08-08; see
+        # notes/deviations_from_paper.md Sec 1.7.
+        assert MultilabelMLP.NEGATIVE_SLOPE == pytest.approx(0.1)
+
+    def test_default_slope_used_when_unspecified(self):
+        m = MultilabelMLP(input_dim=16, output_dim=5)
+        leaky_relus = [mod for mod in m.modules() if isinstance(mod, nn.LeakyReLU)]
+        assert len(leaky_relus) == 3
+        for lr in leaky_relus:
+            assert lr.negative_slope == pytest.approx(0.1)
+
+    def test_negative_slope_still_overridable(self):
+        # Callers (e.g. the smoke-test path) must still be able to pass an
+        # explicit value that overrides the paper-matched default.
+        m = MultilabelMLP(input_dim=16, output_dim=5, negative_slope=0.2)
+        leaky_relus = [mod for mod in m.modules() if isinstance(mod, nn.LeakyReLU)]
+        for lr in leaky_relus:
+            assert lr.negative_slope == pytest.approx(0.2)
