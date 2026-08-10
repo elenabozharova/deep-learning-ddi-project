@@ -13,6 +13,10 @@ __pycache__/
 .idea/
 .vscode/
 
+# AI tooling config -- kept locally, not published
+/CLAUDE.md
+.claude/
+
 # Environment / secrets
 .env
 .env.*
@@ -25,7 +29,7 @@ data/raw/
 data/interim/
 data/processed/
 outputs/
-models/
+/models/
 checkpoints/
 cache/
 .cache/
