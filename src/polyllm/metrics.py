@@ -268,3 +268,53 @@ def average_precision_at_k_multi_label(
         "degenerate_all_positive_labels": degenerate_all_positive,
         "degenerate_all_negative_labels": degenerate_all_negative,
     }
+
+
+# ---------------------------------------------------------------------------
+# AP@k — GNN path's flattened edge-level semantics (Milestone 10f)
+# ---------------------------------------------------------------------------
+
+def edge_level_average_precision_at_k(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    k: int = 50,
+) -> float:
+    """
+    Flattened, single-ranking AP@k — matches the PolyLLM authors' GNN-path
+    reference snippet verbatim (`src/functions.py::average_precision_at_k`,
+    fetched character-for-character 2026-08-11), used by their `eval.py`
+    for the GNN's Table 5 AP@50:
+
+        sorted_indices = np.argsort(y_pred)[::-1]
+        top_k_indices = sorted_indices[:k]
+        top_k_true = y_true[top_k_indices]
+        precisions = [
+            np.sum(top_k_true[:i + 1]) / (i + 1) for i in range(len(top_k_true))
+        ]
+        ap_at_k = np.sum(precisions * top_k_true) / np.sum(top_k_true) if np.sum(top_k_true) > 0 else 0
+
+    This is a THIRD, distinct axis from the two multi-label functions above:
+    those rank within each pair or within each label column separately, then
+    average over columns/rows. This one ranks ALL predictions in a single
+    flat list (e.g. every test-set edge, positive and sampled-negative,
+    across the whole test split at once) and computes one AP@k number
+    directly — appropriate for the GNN's edge-level link-prediction framing,
+    not the MLP path's per-label multilabel framing. Not interchangeable
+    with `sample_mean_ap_at_50` or `average_precision_at_k_multi_label`.
+
+    Note the unusual denominator: `np.sum(top_k_true)` is the count of true
+    positives WITHIN the top-k window only, not the total positive count in
+    the full flattened array — reproduced exactly as the authors wrote it,
+    not "corrected" to a more standard AP@k denominator.
+    """
+    sorted_indices = np.argsort(y_pred)[::-1]
+    top_k_indices = sorted_indices[:k]
+    top_k_true = y_true[top_k_indices].astype(np.float64)
+
+    positions = np.arange(1, len(top_k_true) + 1, dtype=np.float64)
+    precisions = np.cumsum(top_k_true) / positions
+
+    denom = top_k_true.sum()
+    if denom <= 0:
+        return 0.0
+    return float((precisions * top_k_true).sum() / denom)

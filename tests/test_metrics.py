@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from polyllm.metrics import (
     apply_threshold,
     average_precision_at_k_multi_label,
+    edge_level_average_precision_at_k,
     macro_auprc,
     macro_auroc,
     macro_f1,
@@ -359,3 +360,75 @@ class TestAveragePrecisionAtKMultiLabel:
         per_pair_axis  = sample_mean_ap_at_50(y_true, y_score)
         per_label_axis = average_precision_at_k_multi_label(y_true, y_score, k=10)["mean_ap_at_k"]
         assert per_pair_axis != pytest.approx(per_label_axis, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Scenario 18 — edge_level_average_precision_at_k (Milestone 10f, GNN path)
+# ---------------------------------------------------------------------------
+
+def _authors_literal_ap_at_k(y_true, y_pred, k=50):
+    """Direct, unvectorized translation of the authors' functions.py snippet
+    (fetched verbatim), used only to cross-check the vectorized repro."""
+    sorted_indices = np.argsort(y_pred)[::-1]
+    top_k_indices = sorted_indices[:k]
+    top_k_true = y_true[top_k_indices]
+    precisions = [
+        np.sum(top_k_true[:i + 1]) / (i + 1) for i in range(len(top_k_true))
+    ]
+    denom = np.sum(top_k_true)
+    return np.sum(np.array(precisions) * top_k_true) / denom if denom > 0 else 0
+
+
+class TestEdgeLevelAveragePrecisionAtK:
+    def test_matches_authors_literal_translation_on_random_data(self):
+        rng = np.random.default_rng(5)
+        y_true = rng.integers(0, 2, size=200).astype(np.float64)
+        y_pred = rng.random(size=200)
+        expected = _authors_literal_ap_at_k(y_true, y_pred, k=50)
+        actual = edge_level_average_precision_at_k(y_true, y_pred, k=50)
+        assert actual == pytest.approx(expected)
+
+    def test_all_positive_top_k_gives_one(self):
+        y_true = np.ones(60)
+        y_pred = np.arange(60, dtype=np.float64)
+        assert edge_level_average_precision_at_k(y_true, y_pred, k=50) == pytest.approx(1.0)
+
+    def test_no_positives_in_top_k_gives_zero(self):
+        y_true = np.zeros(60)
+        y_pred = np.arange(60, dtype=np.float64)
+        assert edge_level_average_precision_at_k(y_true, y_pred, k=50) == 0.0
+
+    def test_perfect_ranking_gives_one(self):
+        # All true positives ranked strictly above all negatives.
+        y_true = np.array([1.0] * 10 + [0.0] * 40)
+        y_pred = np.concatenate([np.linspace(10, 1, 10), np.linspace(0, -3.9, 40)])
+        assert edge_level_average_precision_at_k(y_true, y_pred, k=50) == pytest.approx(1.0)
+
+    def test_worst_ranking_within_k_is_lower_than_best(self):
+        rng = np.random.default_rng(1)
+        y_true = np.array([1.0] * 5 + [0.0] * 45)
+        best_pred = np.concatenate([np.linspace(10, 6, 5), np.linspace(5, -39, 45)])  # positives first
+        worst_pred = np.concatenate([np.linspace(-39, -35, 5), np.linspace(5, -40, 45)])  # positives buried
+        best_ap = edge_level_average_precision_at_k(y_true, best_pred, k=50)
+        worst_ap = edge_level_average_precision_at_k(y_true, worst_pred, k=50)
+        assert best_ap > worst_ap
+
+    def test_k_larger_than_array_uses_all_rows(self):
+        rng = np.random.default_rng(2)
+        y_true = rng.integers(0, 2, size=10).astype(np.float64)
+        y_pred = rng.random(size=10)
+        expected = _authors_literal_ap_at_k(y_true, y_pred, k=1000)
+        actual = edge_level_average_precision_at_k(y_true, y_pred, k=1000)
+        assert actual == pytest.approx(expected)
+
+    def test_denominator_is_top_k_positives_not_global_positives(self):
+        """Confirms the unusual (but faithfully-reproduced) denominator: adding
+        MORE true positives OUTSIDE the top-k window must not change the score,
+        since the authors' denominator only counts positives inside top-k."""
+        y_true_few_outside = np.array([1.0, 0.0, 0.0, 0.0] + [0.0] * 46)
+        y_true_many_outside = np.array([1.0, 0.0, 0.0, 0.0] + [1.0] * 46)  # extra positives beyond k=4
+        y_pred = np.concatenate([np.linspace(10, 7, 4), np.linspace(-1, -46, 46)])
+
+        ap_few = edge_level_average_precision_at_k(y_true_few_outside, y_pred, k=4)
+        ap_many = edge_level_average_precision_at_k(y_true_many_outside, y_pred, k=4)
+        assert ap_few == pytest.approx(ap_many)

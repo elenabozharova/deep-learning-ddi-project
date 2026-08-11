@@ -1,0 +1,38 @@
+# Milestone 1
+pandas==3.0.3
+numpy==2.4.6
+pyarrow==24.0.0
+pytest==9.1.1
+
+# Milestone 2
+rdkit==2026.3.3
+requests==2.34.2
+
+# Milestone 4
+torch==2.12.1
+transformers==5.12.1
+safetensors==0.8.0
+huggingface-hub==1.21.0
+
+# Milestone 5 — no new packages
+# Milestone 6A — no new packages (rdkit already pinned in Milestone 2)
+
+# Milestone 6B
+scikit-learn==1.6.1
+
+# Milestone 7 — no new packages
+# Milestone 8 — no new packages (scipy already present)
+scipy>=1.10.0
+
+# Milestone 9 — no new packages
+
+# Milestone 10 — GNN reproduction (paper's headline architecture)
+torch_geometric==2.8.0.post1
+# pyg-lib IS required even on CPU-only: GraphConv / to_hetero / RandomLinkSplit
+# work with the pure-Python core alone, but LinkNeighborLoader's actual
+# neighbor-sampling backend needs a compiled extension (pyg-lib or
+# torch-sparse) — confirmed the hard way (ImportError) when first running
+# the real loader in Milestone 10e. Installed from the PyG wheel index for
+# this exact torch build:
+#   pip install pyg-lib -f https://data.pyg.org/whl/torch-2.12.1+cpu.html
+pyg-lib==0.8.0+pt212cpu
