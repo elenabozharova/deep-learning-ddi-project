@@ -137,7 +137,12 @@ def compare_to_paper(metrics: dict) -> dict:
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def run_evaluation(checkpoint_path: Path = CHECKPOINT_PATH, config_path: Path = CONFIG_PATH) -> dict:
+def run_evaluation(
+    checkpoint_path: Path = CHECKPOINT_PATH,
+    config_path: Path = CONFIG_PATH,
+    graph_path: Path = GRAPH_PATH,
+    metrics_output_path: Path = METRICS_OUTPUT_PATH,
+) -> dict:
     if not checkpoint_path.exists():
         raise FileNotFoundError(
             f"No checkpoint at {checkpoint_path}. Run train_gnn.py first."
@@ -147,8 +152,8 @@ def run_evaluation(checkpoint_path: Path = CHECKPOINT_PATH, config_path: Path = 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    print(f"Loading graph split from {GRAPH_PATH} ...")
-    saved = load_graph_split()
+    print(f"Loading graph split from {graph_path} ...")
+    saved = load_graph_split(graph_path)
     full_data, test_data = saved["full"], saved["test"]
     print(f"Test supervision edges: {test_data[EDGE_TYPE].edge_label_index.size(1)}")
 
@@ -200,8 +205,9 @@ def run_evaluation(checkpoint_path: Path = CHECKPOINT_PATH, config_path: Path = 
         ),
     }
 
-    METRICS_OUTPUT_PATH.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    print(f"\nResults saved -> {METRICS_OUTPUT_PATH}")
+    metrics_output_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    print(f"\nResults saved -> {metrics_output_path}")
 
     return result
 
@@ -214,12 +220,18 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evaluate the trained GNN on the test split (Milestone 10f).")
     p.add_argument("--checkpoint", type=Path, default=CHECKPOINT_PATH)
     p.add_argument("--config",     type=Path, default=CONFIG_PATH)
+    p.add_argument("--graph-path", type=Path, default=GRAPH_PATH,
+                   help="Graph split .pt to evaluate on (must match the one the checkpoint was trained on).")
+    p.add_argument("--metrics-output", type=Path, default=METRICS_OUTPUT_PATH)
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    run_evaluation(checkpoint_path=args.checkpoint, config_path=args.config)
+    run_evaluation(
+        checkpoint_path=args.checkpoint, config_path=args.config,
+        graph_path=args.graph_path, metrics_output_path=args.metrics_output,
+    )
 
 
 if __name__ == "__main__":

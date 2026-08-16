@@ -243,6 +243,14 @@ def load_graph_split(graph_path: Path = GRAPH_PATH) -> dict[str, Any]:
     return torch.load(graph_path, weights_only=False)
 
 
+def _derive_output_paths(output_dir: Path) -> dict[str, Path]:
+    return {
+        "checkpoint": output_dir / "checkpoints/best_model.pt",
+        "history": output_dir / "training_history.csv",
+        "config": output_dir / "training_config.json",
+    }
+
+
 def build_model(full_data, config: dict, device: torch.device) -> GNNLinkPredictor:
     model = GNNLinkPredictor(
         num_pdrugs=full_data["pdrugs"].num_nodes,
@@ -255,12 +263,20 @@ def build_model(full_data, config: dict, device: torch.device) -> GNNLinkPredict
     return model
 
 
-def run_full_training(config: dict, overwrite: bool = False) -> None:
-    if CHECKPOINT_PATH.exists() and not overwrite:
-        print(f"Checkpoint already exists at {CHECKPOINT_PATH}.\nPass --overwrite to re-train.")
+def run_full_training(
+    config: dict,
+    overwrite: bool = False,
+    graph_path: Path = GRAPH_PATH,
+    output_dir: Path = OUTPUT_DIR,
+) -> None:
+    paths = _derive_output_paths(output_dir)
+    checkpoint_path, history_path, config_path = paths["checkpoint"], paths["history"], paths["config"]
+
+    if checkpoint_path.exists() and not overwrite:
+        print(f"Checkpoint already exists at {checkpoint_path}.\nPass --overwrite to re-train.")
         return
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -268,8 +284,8 @@ def run_full_training(config: dict, overwrite: bool = False) -> None:
     seed = config["random_seed"]
     set_seeds(seed)
 
-    print(f"Loading graph split from {GRAPH_PATH} ...")
-    saved = load_graph_split()
+    print(f"Loading graph split from {graph_path} ...")
+    saved = load_graph_split(graph_path)
     full_data, train_data, val_data = saved["full"], saved["train"], saved["val"]
     print(
         f"pdrugs={full_data['pdrugs'].num_nodes}  seffect={full_data['seffect'].num_nodes}  "
@@ -302,10 +318,10 @@ def run_full_training(config: dict, overwrite: bool = False) -> None:
             "torch_geometric": torch_geometric.__version__,
         },
     }
-    CONFIG_PATH.write_text(json.dumps(full_config, indent=2))
-    print(f"Config saved -> {CONFIG_PATH}")
+    config_path.write_text(json.dumps(full_config, indent=2))
+    print(f"Config saved -> {config_path}")
 
-    early_stop = EarlyStopping(patience=config["patience"], path=CHECKPOINT_PATH)
+    early_stop = EarlyStopping(patience=config["patience"], path=checkpoint_path)
     history: list[dict] = []
 
     print(f"\nTraining for up to {config['max_epochs']} epochs (patience={config['patience']}) ...")
@@ -333,10 +349,10 @@ def run_full_training(config: dict, overwrite: bool = False) -> None:
             print(f"\nEarly stopping triggered after epoch {epoch} (no improvement for {config['patience']} epochs).")
             break
 
-    pd.DataFrame(history).to_csv(HISTORY_PATH, index=False)
-    print(f"\nHistory saved -> {HISTORY_PATH}")
+    pd.DataFrame(history).to_csv(history_path, index=False)
+    print(f"\nHistory saved -> {history_path}")
     print(f"Best epoch: {early_stop.best_epoch}  val_loss={early_stop.val_loss_min:.4f}")
-    print(f"Checkpoint saved -> {CHECKPOINT_PATH}")
+    print(f"Checkpoint saved -> {checkpoint_path}")
     print("\nTraining complete. Run evaluate_gnn.py for test-set metrics.")
 
 
@@ -433,6 +449,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--patience",        type=int,   default=DEFAULT_CONFIG["patience"])
     p.add_argument("--overwrite",       action="store_true",
                    help="Overwrite an existing checkpoint.")
+    p.add_argument("--graph-path",      type=Path,  default=GRAPH_PATH,
+                   help="Graph split .pt to train on (only the seffect.x source should differ across runs).")
+    p.add_argument("--output-dir",      type=Path,  default=OUTPUT_DIR,
+                   help="Directory for checkpoint/history/config (keep distinct per side-effect encoder).")
     return p.parse_args()
 
 
@@ -453,7 +473,10 @@ def main() -> None:
     if args.smoke_test:
         run_smoke_test(config)
     else:
-        run_full_training(config, overwrite=args.overwrite)
+        run_full_training(
+            config, overwrite=args.overwrite,
+            graph_path=args.graph_path, output_dir=args.output_dir,
+        )
 
 
 if __name__ == "__main__":
