@@ -1,5 +1,6 @@
 # Virtual environments
 .venv-polyllm/
+.venv-polyllm-legacy/
 .venv/
 venv/
 
