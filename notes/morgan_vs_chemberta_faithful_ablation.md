@@ -1,14 +1,24 @@
 # Controlled Representation Ablation — Morgan vs. ChemBERTa, Matched M9e Training Recipe
 
 **Date:** 2026-08-13/14
-**Status:** Complete — controlled ablation, NOT an official reproduction result
+**Status:** Complete. **Redesignated OFFICIAL 2026-09-01** — see note below (originally: controlled ablation, not an official reproduction result).
 
-> **This is a controlled ablation/comparison, not an "official" PolyLLM
-> reproduction result.** The official Morgan baseline remains
-> `outputs/baseline/morgan/` (Milestone 6B/9c, BCE loss, lr=0.001, batch=256).
-> The official ChemBERTa result remains `outputs/polyllm/chemberta/`
-> (Milestone 7/9c, same recipe). Neither directory, nor any file inside it,
-> was read for training, modified, or overwritten by this ablation.
+> **REDESIGNATION, 2026-09-01:** per explicit user decision made while
+> drafting the reproduction paper, this Milestone 9f Morgan run
+> (`outputs/baseline/morgan_faithful_training/`) is now the **official**
+> Morgan baseline, paired with the already-redesignated Milestone 9e
+> ChemBERTa result (`outputs/polyllm/chemberta_faithful_training/`,
+> `notes/deviations_from_paper.md` §1.9) — both trained under the same
+> paper-matching recipe. Rationale: a paper reproduction should report the
+> paper-matching configuration, not the historically-first BCE/lr=0.001
+> one. The original text below (written before this redesignation) is kept
+> for its historical framing and is otherwise still accurate — everywhere
+> it says the M6B/7/9c (BCE) runs are "official," read that as superseded;
+> `outputs/baseline/morgan/` and `outputs/polyllm/chemberta/` are retained
+> on disk unmodified as secondary/historical reference points, and remain
+> useful for exactly the robustness point this ablation itself makes: Morgan
+> beats ChemBERTa under **both** training recipes, so the finding isn't an
+> artifact of the (now-superseded) recipe choice.
 
 ---
 
@@ -211,7 +221,10 @@ frozen general-purpose chemical-language-model embedding on this
 particular task — only that they do, robustly, under matched training
 conditions.
 
-**Status:** frozen as a completed controlled ablation. Not promoted to
-"official" status; the official Morgan and ChemBERTa results remain
-Milestone 6B/7/9c as documented in `notes/morgan_baseline_findings.md` and
-`notes/chemberta_mlp_findings.md`.
+**Status:** frozen as a completed controlled ablation. **Redesignated
+OFFICIAL 2026-09-01** (see top-of-file note) — Milestone 9f/9e are now the
+official Morgan and ChemBERTa results for paper-reproduction purposes.
+Milestone 6B/7/9c (documented in `notes/morgan_baseline_findings.md` and
+`notes/chemberta_mlp_findings.md`) are retained as a secondary/historical
+reference, and as the source of the robustness claim above (same
+conclusion under two recipes).
