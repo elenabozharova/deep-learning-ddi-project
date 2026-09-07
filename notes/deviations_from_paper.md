@@ -92,7 +92,11 @@ Reproduction: `notes/split_findings.md`, single split seed=42; `notes/morgan_bas
 
 ### 1.3 AP@50 formula: incompatible values — RESOLVED 2026-08-08 (Milestone 9b)
 
-**Status: the axis-mismatch hypothesis below is now confirmed.** The paper author supplied their exact reference implementation directly:
+**Status: the axis-mismatch hypothesis below is now confirmed.** The authors' exact
+reference implementation was found in their public code repository
+(`github.com/sadrahkm/PolyLLM`, `src/functions.py` — the same repo later used verbatim
+for the GNN reproduction, §1.4). The authors were **not** contacted; this is their
+published `functions.py` as committed:
 
 ```python
 def average_precision_at_k_multi_label(y_true, y_pred, k=50):
@@ -107,7 +111,7 @@ def average_precision_at_k_multi_label(y_true, y_pred, k=50):
 
 This loops over **labels** (`range(y_true.shape[1])`, 963 iterations) and, for each label, ranks all **pairs** by that label's score, keeping the top-k pairs. The reproduction's original `sample_mean_ap_at_50()` (`src/polyllm/metrics.py`) loops over **pairs** and ranks the 963 **labels** within each pair — the opposite axis. This is exactly the "different aggregation direction (per-pair vs per-label)" hypothesis recorded below at the time this section was first written.
 
-The author's exact function is now implemented as `average_precision_at_k_multi_label()` in `src/polyllm/metrics.py`, and recomputed against the already-saved Milestone 6B/7 test predictions (no retraining, no checkpoint reloaded) by `src/polyllm/recompute_ap_at_k.py` (Milestone 9b). Results:
+The authors' exact function (from their `src/functions.py`) is now implemented as `average_precision_at_k_multi_label()` in `src/polyllm/metrics.py`, and recomputed against the already-saved Milestone 6B/7 test predictions (no retraining, no checkpoint reloaded) by `src/polyllm/recompute_ap_at_k.py` (Milestone 9b). Results:
 
 | Property | Paper (DeepChem ChemBERTa MLP) | Reproduction — original per-pair axis | Reproduction — corrected per-label axis |
 |---|---|---|---|
@@ -118,9 +122,9 @@ The author's exact function is now implemented as `average_precision_at_k_multi_
 
 **Consequence:** The corrected per-label-axis AP@50 closes roughly 75% of the original 0.3762 gap. The metric is far more comparable now than before, though not identical — the residual +0.0934 (reproduction above paper) is directionally consistent with the already-observed pattern that this reproduction's AUROC (+1.2 std) and AUPRC (+6.5 std) both sit above the paper's reported means (§2.6), so the remaining gap most likely shares whatever cause underlies those two, rather than being a new, AP@50-specific issue.
 
-**One remaining caveat:** 69/963 ChemBERTa labels (7.2%; 199/963 for Morgan) have all 50 top-ranked pairs positive within that label's own top-50, which makes `average_precision_score` return exactly 1.0 for those columns by construction. This is a property of the formula itself (confirmed present in the author's snippet, not a reproduction bug), not filtered out, and inflates the mean somewhat for very high-prevalence or well-separated labels. Zero labels had the opposite (all-negative-in-top-50) degeneracy for either model.
+**One remaining caveat:** 69/963 ChemBERTa labels (7.2%; 199/963 for Morgan) have all 50 top-ranked pairs positive within that label's own top-50, which makes `average_precision_score` return exactly 1.0 for those columns by construction. This is a property of the formula itself (confirmed present in the authors' `functions.py`, not a reproduction bug), not filtered out, and inflates the mean somewhat for very high-prevalence or well-separated labels. Zero labels had the opposite (all-negative-in-top-50) degeneracy for either model.
 
-**What is still not verified:** whether `average_precision_score`'s sklearn interpolated-AP formula is bit-for-bit what the paper's own code used internally (the author's snippet does use `sklearn.metrics.average_precision_score`, so this is now a much safer assumption than before), and whether the paper's own 10-fold protocol changes this number materially (§1.2 remains a separate, still-open deviation).
+**What is still not verified:** whether `average_precision_score`'s sklearn interpolated-AP formula is bit-for-bit what the paper's own code used internally (the authors' `functions.py` does call `sklearn.metrics.average_precision_score`, so this is now a much safer assumption than before), and whether the paper's own 10-fold protocol changes this number materially (§1.2 remains a separate, still-open deviation).
 
 **Update 2026-08-09 (Milestone 9c):** after retraining both MLPs with the paper-matched LeakyReLU slope=0.1 (§1.7), this metric was recomputed against the new predictions. ChemBERTa's paper-axis AP@50 moved from 0.8491 to **0.8146** — a further narrowing from +7.8 to **+4.9 std devs** above the paper mean (0.7557 ± 0.0120), on top of the axis fix above. Degenerate all-positive-top-50 columns dropped from 69/963 (7.2%) to 28/963 (2.9%), consistent with the slope=0.1 model being somewhat less confident/less separated overall (see the parallel drop in raw AUPRC in §1.7). Morgan (context only): 0.8950 → 0.8716. Current numbers: `outputs/polyllm/chemberta/ap_at_k_recompute.json`, `outputs/baseline/morgan/ap_at_k_recompute.json`; the pre-retrain values above remain historically accurate for the archived slope=0.01 checkpoints.
 
@@ -459,9 +463,9 @@ SHA-256 hashes are recorded for all major intermediate and output artifacts acro
 
 The reproduction reports both macro and micro AUPRC. The paper reports only (macro) AUPRC. Micro AUPRC evaluates performance at the flattened label-instance level and is less sensitive to the performance distribution across labels.
 
-### 3.8 Author-verified AP@k recomputation (Milestone 9b)
+### 3.8 Source-verified AP@k recomputation (Milestone 9b)
 
-`average_precision_at_k_multi_label()` (`src/polyllm/metrics.py`) and `src/polyllm/recompute_ap_at_k.py` implement and run the paper author's own reference AP@k snippet against the already-saved Milestone 6B/7 predictions, with no retraining and no modification of any existing artifact (verified by SHA-256 comparison before/after). This resolved §1.3 from a complete mismatch to a much narrower, directionally-explicable gap. See `outputs/baseline/morgan/ap_at_k_recompute.json` and `outputs/polyllm/chemberta/ap_at_k_recompute.json`.
+`average_precision_at_k_multi_label()` (`src/polyllm/metrics.py`) and `src/polyllm/recompute_ap_at_k.py` implement and run the authors' own reference AP@k function (a verbatim port of `average_precision_at_k_multi_label` from their public `src/functions.py` — authors not contacted) against the already-saved Milestone 6B/7 predictions, with no retraining and no modification of any existing artifact (verified by SHA-256 comparison before/after). This resolved §1.3 from a complete mismatch to a much narrower, directionally-explicable gap. See `outputs/baseline/morgan/ap_at_k_recompute.json` and `outputs/polyllm/chemberta/ap_at_k_recompute.json`.
 
 ---
 
