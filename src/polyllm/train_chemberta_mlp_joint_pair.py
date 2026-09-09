@@ -1,0 +1,495 @@
+"""
+Joint-pair-encoding extension — ChemBERTa MLP with a joint (not summed)
+drug-pair embedding.
+
+Goal (user-specified, professor-suggestion #3): the official pipeline
+encodes Drug A and Drug B independently through frozen ChemBERTa and
+combines them with an element-wise sum -- the two molecules never interact
+inside the encoder. This experiment instead feeds both SMILES into frozen
+ChemBERTa TOGETHER, as a standard sentence-pair input, in one forward pass,
+so self-attention can relate the two molecules to each other before
+pooling. Order-invariance (an explicit requirement of the original
+suggestion) is preserved by encoding both (A,B) and (B,A) and averaging
+the two resulting embeddings. See generate_joint_pair_embeddings.py for the
+embedding-generation step this script consumes.
+
+This is a copy of train_chemberta_mlp_faithful.py (Milestone 9e) with ONLY
+the input embeddings and output directory changed -- architecture, loss
+(BinaryFocalLossWithLogits, gamma=2.0, label_smoothing=0.2), batch size
+(32), LR schedule (Keras-style per-step exponential decay), split, and
+seed are all identical to the official M9e ChemBERTa result, so any
+difference in outcome is attributable to the pair-embedding method, not a
+confound from other changed hyperparameters.
+
+Output goes to outputs/polyllm/chemberta_joint_pair_training/ -- a new,
+separate directory. outputs/polyllm/chemberta_faithful_training/ (the
+official M9e result) is not touched.
+
+Official run:
+    .venv-polyllm/Scripts/python.exe src/polyllm/train_chemberta_mlp_joint_pair.py
+
+After training completes, run the separate evaluator:
+    .venv-polyllm/Scripts/python.exe src/polyllm/evaluate_chemberta_mlp_faithful.py
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import platform
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+
+_src = Path(__file__).resolve().parent.parent
+if str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
+
+from polyllm.losses import BinaryFocalLossWithLogits
+from polyllm.lr_schedules import keras_exponential_decay_lr
+from polyllm.metrics import apply_threshold, macro_auprc, micro_f1, select_threshold
+from polyllm.models.mlp import MultilabelMLP
+from polyllm.training import (
+    EarlyStopping,
+    PairDataset,
+    load_checkpoint,
+    make_seeded_loader,
+    run_val_epoch,
+    save_checkpoint,
+    set_seeds,
+    validate_input_alignment,
+)
+
+# ---------------------------------------------------------------------------
+# Fixed paths — identical inputs to Milestone 7/9c/9d; output directory is new
+# ---------------------------------------------------------------------------
+
+FEATURES_PATH   = Path("data/features/chemberta_joint_pair_embeddings.npy")
+LABELS_PATH     = Path("data/processed/polyllm_labels.npy")
+PAIR_INDEX_PATH = Path("data/features/chemberta_pair_index.csv")
+LABEL_MAP_PATH  = Path("data/processed/polyllm_label_mapping.csv")
+TRAIN_IDS_PATH  = Path("data/splits/train_pair_ids.csv")
+VAL_IDS_PATH    = Path("data/splits/validation_pair_ids.csv")
+TEST_IDS_PATH   = Path("data/splits/test_pair_ids.csv")  # loaded for alignment only
+
+OUTPUT_DIR      = Path("outputs/polyllm/chemberta_joint_pair_training")
+CHECKPOINT_PATH = OUTPUT_DIR / "checkpoints/best_model.pt"
+HISTORY_PATH    = OUTPUT_DIR / "training_history.csv"
+CONFIG_PATH     = OUTPUT_DIR / "training_config.json"
+THRESHOLD_PATH  = OUTPUT_DIR / "validation_threshold.json"
+
+# ---------------------------------------------------------------------------
+# Default training configuration
+# ---------------------------------------------------------------------------
+
+DEFAULT_CONFIG: dict = {
+    "random_seed":                42,
+    "optimizer":                  "Adam",
+    "adam_beta1":                 0.9,
+    "adam_beta2":                 0.999,
+    "adam_eps":                   1e-7,      # Keras default; PyTorch default is 1e-8. Explicit for fidelity.
+    "learning_rate_initial":      0.005,
+    "lr_schedule":                "keras_exponential_decay",
+    "lr_decay_steps":             1000,
+    "lr_decay_rate":              0.96,
+    "lr_staircase":                True,
+    "lr_step_granularity":        "per_optimizer_step",  # NOT per-epoch (that was M9d's mistake)
+    "loss":                       "BinaryFocalLossWithLogits",
+    "focal_gamma":                2.0,
+    "focal_alpha":                -1.0,      # disabled -- matches Keras apply_class_balancing=False
+    "focal_label_smoothing":      0.2,       # matches authors' losses.BinaryFocalCrossentropy(label_smoothing=0.2)
+    "batch_size":                 32,        # Keras model.fit() default (authors' batch_size=128 is commented out)
+    "max_epochs":                 100,
+    "patience":                   10,        # NOT authors' patience=0 -- see intentional_deviations below
+    "min_delta":                  0.0001,
+    "model_selection_metric":     "validation_macro_auprc",  # NOT authors' val_AUC -- see intentional_deviations
+    "restore_best_checkpoint":    True,       # NOT authors' restore_best_weights=False -- see intentional_deviations
+    "dropout":                    0.2,
+    "leaky_relu_negative_slope":  0.1,
+    "num_workers":                0,
+    "input_dim":                  384,
+    "output_dim":                 963,
+    "hidden_dims":                [512, 1024, 2048],
+    "batch_norm_after_layer":     1,
+    "feature_source":             str(FEATURES_PATH),
+    "label_source":                str(LABELS_PATH),
+    "representation":             "ChemBERTa-77M-MLM frozen JOINT pair embeddings (both SMILES in one "
+                                   "sentence-pair forward pass, order-symmetrized by averaging both "
+                                   "orderings -- see generate_joint_pair_embeddings.py; NOT the "
+                                   "element-wise-sum-of-independent-embeddings baseline)",
+    "kernel_initializer":         "pytorch_default (kaiming_uniform_, a=sqrt(5)) -- NOT matched to authors' he_normal",
+    "intentional_deviations_from_authors": [
+        "Single fixed 80/10/10 pair-random split (Milestone 3), not the authors' "
+        "90/10 train_val/test split with 10-fold CV carved out of the 90%.",
+        "No sequential 10-fold weight/optimizer carryover -- one model, one "
+        "continuous training run on the fixed split.",
+        "Early stopping: patience=10, monitor=validation_macro_auprc, best "
+        "checkpoint explicitly restored for evaluation -- NOT the authors' "
+        "patience=0, monitor=val_AUC, restore_best_weights=False.",
+        "1 run, not the authors' 10 outer iterations averaged for a mean +/- std.",
+        "PyTorch default Linear initialization (kaiming_uniform_, a=sqrt(5)), "
+        "not Keras' he_normal.",
+        "Loss operates on logits internally (sigmoid computed inside the loss "
+        "module); the authors' model ends in an explicit sigmoid layer and "
+        "the loss operates on those probabilities (from_logits=False). "
+        "Mathematically reconcilable in exact arithmetic; not re-verified "
+        "bit-for-bit against Keras' probability-based binary_crossentropy "
+        "numerical-stability epsilon handling.",
+    ],
+    "experiment_note": (
+        "Joint-pair-encoding extension (user's suggestion #3 to the professor: "
+        "instead of independently encoding Drug A and Drug B then summing, feed "
+        "both SMILES into frozen ChemBERTa together in one forward pass via "
+        "standard sentence-pair tokenization, so self-attention can relate the "
+        "two molecules to each other). Order-invariance preserved by encoding "
+        "both (A,B) and (B,A) and averaging. Same MultilabelMLP architecture, "
+        "same M9e faithful loss/batch/LR-schedule recipe, same fixed 80/10/10 "
+        "split, same seed=42 as the official M9e ChemBERTa result -- ONLY the "
+        "pair-embedding-generation method differs, for a controlled comparison "
+        "against outputs/polyllm/chemberta_faithful_training/. Literature "
+        "precedent: Deac et al. (2019), 'Drug-Drug Adverse Effect Prediction "
+        "with Graph Co-Attention', argues for integrating joint drug-pair "
+        "information early rather than combining independent embeddings."
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# ChemBERTa-specific feature validation (same as train_chemberta_mlp.py)
+# ---------------------------------------------------------------------------
+
+def validate_chemberta_features(features: np.ndarray) -> None:
+    if features.dtype != np.float32:
+        raise ValueError(f"ChemBERTa features must be float32, got {features.dtype}.")
+    non_finite = int((~np.isfinite(features)).sum())
+    if non_finite > 0:
+        raise ValueError(f"ChemBERTa features contain {non_finite} non-finite values (NaN/Inf).")
+    all_zero_rows = int(np.all(features == 0, axis=1).sum())
+    if all_zero_rows > 0:
+        raise ValueError(f"ChemBERTa features have {all_zero_rows} all-zero rows.")
+
+
+# ---------------------------------------------------------------------------
+# Argument parser
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Joint-pair-encoding extension: ChemBERTa MLP on jointly-encoded (not summed) drug-pair embeddings."
+    )
+    p.add_argument("--seed",         type=int,   default=DEFAULT_CONFIG["random_seed"])
+    p.add_argument("--batch-size",   type=int,   default=DEFAULT_CONFIG["batch_size"])
+    p.add_argument("--max-epochs",   type=int,   default=DEFAULT_CONFIG["max_epochs"])
+    p.add_argument("--patience",     type=int,   default=DEFAULT_CONFIG["patience"])
+    p.add_argument("--lr",           type=float, default=DEFAULT_CONFIG["learning_rate_initial"])
+    p.add_argument("--lr-decay-steps", type=int, default=DEFAULT_CONFIG["lr_decay_steps"])
+    p.add_argument("--lr-decay-rate", type=float, default=DEFAULT_CONFIG["lr_decay_rate"])
+    p.add_argument("--focal-gamma",  type=float, default=DEFAULT_CONFIG["focal_gamma"])
+    p.add_argument("--label-smoothing", type=float, default=DEFAULT_CONFIG["focal_label_smoothing"])
+    p.add_argument("--dropout",      type=float, default=DEFAULT_CONFIG["dropout"])
+    p.add_argument("--overwrite",    action="store_true",
+                    help="Overwrite existing training outputs.")
+    return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Data loading (identical to Milestone 7/9c/9d)
+# ---------------------------------------------------------------------------
+
+def load_data():
+    print("Loading data ...")
+    features   = np.load(FEATURES_PATH, mmap_mode="r")
+    labels     = np.load(LABELS_PATH,   mmap_mode="r")
+    pair_index = pd.read_csv(PAIR_INDEX_PATH)
+    label_map  = pd.read_csv(LABEL_MAP_PATH)
+    train_ids  = pd.read_csv(TRAIN_IDS_PATH)["pair_id"].to_numpy()
+    val_ids    = pd.read_csv(VAL_IDS_PATH)["pair_id"].to_numpy()
+    test_ids   = pd.read_csv(TEST_IDS_PATH)["pair_id"].to_numpy()  # IDs only
+    return features, labels, pair_index, label_map, train_ids, val_ids, test_ids
+
+
+# ---------------------------------------------------------------------------
+# Per-step-LR training epoch (local to this script -- training.py's shared
+# run_train_epoch is untouched, so M6B/M7/M9c/M9d are unaffected)
+# ---------------------------------------------------------------------------
+
+def run_train_epoch_with_step_schedule(
+    model: torch.nn.Module,
+    loader: torch.utils.data.DataLoader,
+    criterion: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    global_step: int,
+    lr_initial: float,
+    lr_decay_steps: int,
+    lr_decay_rate: float,
+    lr_staircase: bool,
+) -> tuple[float, int, float, float]:
+    """One training epoch with the LR set from keras_exponential_decay_lr
+    BEFORE every optimizer step (i.e. per mini-batch, not per epoch).
+
+    Returns (avg_train_loss, updated_global_step, lr_at_epoch_start, lr_at_epoch_end).
+    """
+    model.train()
+    total_loss = 0.0
+    n_batches = 0
+    lr_at_epoch_start = keras_exponential_decay_lr(
+        global_step, lr_initial, lr_decay_steps, lr_decay_rate, lr_staircase
+    )
+    lr_this_step = lr_at_epoch_start
+
+    for _pair_ids, x, y in loader:
+        lr_this_step = keras_exponential_decay_lr(
+            global_step, lr_initial, lr_decay_steps, lr_decay_rate, lr_staircase
+        )
+        for pg in optimizer.param_groups:
+            pg["lr"] = lr_this_step
+
+        x, y = x.to(device), y.to(device)
+        optimizer.zero_grad()
+        logits = model(x)
+        loss = criterion(logits, y)
+        loss.backward()
+        optimizer.step()
+
+        total_loss += float(loss.item())
+        n_batches += 1
+        global_step += 1
+
+    avg_loss = total_loss / n_batches if n_batches else 0.0
+    return avg_loss, global_step, lr_at_epoch_start, lr_this_step
+
+
+# ---------------------------------------------------------------------------
+# Full training
+# ---------------------------------------------------------------------------
+
+def build_config(args: argparse.Namespace) -> dict:
+    cfg = dict(DEFAULT_CONFIG)
+    cfg["random_seed"]              = args.seed
+    cfg["batch_size"]                = args.batch_size
+    cfg["max_epochs"]                = args.max_epochs
+    cfg["patience"]                  = args.patience
+    cfg["learning_rate_initial"]     = args.lr
+    cfg["lr_decay_steps"]            = args.lr_decay_steps
+    cfg["lr_decay_rate"]             = args.lr_decay_rate
+    cfg["focal_gamma"]               = args.focal_gamma
+    cfg["focal_label_smoothing"]     = args.label_smoothing
+    cfg["dropout"]                   = args.dropout
+    return cfg
+
+
+def run_full_training(
+    features: np.ndarray,
+    labels: np.ndarray,
+    train_ids: np.ndarray,
+    val_ids: np.ndarray,
+    config: dict,
+    overwrite: bool = False,
+) -> None:
+    if CHECKPOINT_PATH.exists() and THRESHOLD_PATH.exists() and not overwrite:
+        print(
+            f"Training outputs already exist at {OUTPUT_DIR}.\n"
+            "Pass --overwrite to re-train."
+        )
+        return
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    (OUTPUT_DIR / "checkpoints").mkdir(parents=True, exist_ok=True)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    seed = config["random_seed"]
+    set_seeds(seed)
+
+    model = MultilabelMLP(
+        input_dim=config["input_dim"],
+        output_dim=config["output_dim"],
+        dropout=config["dropout"],
+        negative_slope=config["leaky_relu_negative_slope"],
+    ).to(device)
+
+    n_params = model.count_parameters()
+    print(f"Model: MultilabelMLP(input_dim=384)  parameters: {n_params:,}")
+
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=config["learning_rate_initial"],
+        betas=(config["adam_beta1"], config["adam_beta2"]),
+        eps=config["adam_eps"],
+    )
+    criterion = BinaryFocalLossWithLogits(
+        gamma=config["focal_gamma"],
+        alpha=config["focal_alpha"],
+        label_smoothing=config["focal_label_smoothing"],
+    )
+    print(f"Loss: BinaryFocalLossWithLogits(gamma={config['focal_gamma']}, "
+          f"alpha={config['focal_alpha']} [disabled], "
+          f"label_smoothing={config['focal_label_smoothing']})")
+    print(f"Optimizer: Adam(lr={config['learning_rate_initial']}, "
+          f"betas=({config['adam_beta1']},{config['adam_beta2']}), eps={config['adam_eps']})")
+
+    n_train = len(train_ids)
+    steps_per_epoch = -(-n_train // config["batch_size"])  # ceil division
+    print(f"Batch size: {config['batch_size']}  ->  ~{steps_per_epoch} optimizer steps/epoch "
+          f"({n_train} train pairs)")
+    print(f"LR schedule: keras_exponential_decay_lr(step, {config['learning_rate_initial']}, "
+          f"decay_steps={config['lr_decay_steps']}, decay_rate={config['lr_decay_rate']}, "
+          f"staircase={config['lr_staircase']}), applied per optimizer step")
+
+    import sklearn
+    import torch as _torch
+    software_versions = {
+        "python":       platform.python_version(),
+        "torch":        _torch.__version__,
+        "numpy":        np.__version__,
+        "pandas":       pd.__version__,
+        "scikit_learn": sklearn.__version__,
+    }
+
+    full_config = {
+        **config,
+        "total_parameters": n_params,
+        "device":           str(device),
+        "train_pairs":      len(train_ids),
+        "val_pairs":        len(val_ids),
+        "approx_steps_per_epoch": steps_per_epoch,
+        "software_versions": software_versions,
+    }
+
+    CONFIG_PATH.write_text(json.dumps(full_config, indent=2))
+    print(f"Config saved -> {CONFIG_PATH}")
+
+    train_ds = PairDataset(train_ids, features, labels)
+    val_ds   = PairDataset(val_ids,   features, labels)
+    train_loader = make_seeded_loader(
+        train_ds, config["batch_size"], shuffle=True,
+        seed=seed, num_workers=config["num_workers"]
+    )
+    val_loader = make_seeded_loader(
+        val_ds, config["batch_size"], shuffle=False,
+        seed=seed, num_workers=config["num_workers"]
+    )
+    # Validation loss is computed with the SAME criterion the model trains
+    # under, for an apples-to-apples train/val loss comparison.
+    val_criterion = criterion
+
+    early_stop = EarlyStopping(patience=config["patience"], min_delta=config["min_delta"])
+    history: list[dict] = []
+    global_step = 0
+
+    print(f"\nTraining for up to {config['max_epochs']} epochs "
+          f"(patience={config['patience']}, min_delta={config['min_delta']}) ...")
+
+    for epoch in range(1, config["max_epochs"] + 1):
+        global_step_start = global_step
+        train_loss, global_step, lr_start, lr_end = run_train_epoch_with_step_schedule(
+            model, train_loader, criterion, optimizer, device,
+            global_step,
+            config["learning_rate_initial"], config["lr_decay_steps"],
+            config["lr_decay_rate"], config["lr_staircase"],
+        )
+        val_loss, val_probs, val_labels, _pids = run_val_epoch(
+            model, val_loader, val_criterion, device
+        )
+
+        val_mauprc = macro_auprc(val_labels, val_probs)["macro_auprc"]
+        improved   = early_stop.step(val_mauprc, epoch)
+
+        if improved:
+            save_checkpoint(
+                CHECKPOINT_PATH, model, optimizer,
+                epoch=epoch, score=val_mauprc, config=full_config
+            )
+
+        history.append({
+            "epoch":              epoch,
+            "train_loss":         round(train_loss, 6),
+            "val_loss":           round(val_loss, 6),
+            "val_macro_auprc":    round(val_mauprc, 6),
+            "checkpoint_saved":   improved,
+            "global_step_start":  global_step_start,
+            "global_step_end":    global_step,
+            "lr_at_epoch_start":  round(lr_start, 8),
+            "lr_at_epoch_end":    round(lr_end, 8),
+        })
+
+        marker = " <- best" if improved else ""
+        print(
+            f"  Epoch {epoch:3d}/{config['max_epochs']}  "
+            f"step={global_step:6d}  lr={lr_start:.6f}->{lr_end:.6f}  "
+            f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  "
+            f"val_macro_auprc={val_mauprc:.4f}{marker}"
+        )
+
+        if early_stop.should_stop:
+            print(f"\nEarly stopping triggered after epoch {epoch} "
+                  f"(no improvement for {config['patience']} epochs).")
+            break
+
+    pd.DataFrame(history).to_csv(HISTORY_PATH, index=False)
+    print(f"\nHistory saved -> {HISTORY_PATH}")
+    print(f"Best epoch: {early_stop.best_epoch}  "
+          f"val_macro_auprc={early_stop.best_score:.4f}")
+
+    # -----------------------------------------------------------------------
+    # Threshold selection on validation only
+    # -----------------------------------------------------------------------
+    print("\nLoading best checkpoint for threshold selection ...")
+    best_model = MultilabelMLP(
+        input_dim=config["input_dim"],
+        output_dim=config["output_dim"],
+        dropout=config["dropout"],
+        negative_slope=config["leaky_relu_negative_slope"],
+    ).to(device)
+    ckpt = load_checkpoint(CHECKPOINT_PATH, best_model, device=device)
+    print(f"  Restored epoch {ckpt['epoch']}  val_macro_auprc={ckpt['val_macro_auprc']:.4f}")
+
+    _, val_probs, val_labels, _ = run_val_epoch(best_model, val_loader, val_criterion, device)
+
+    thr_result = select_threshold(val_labels, val_probs)
+    val_pred_05 = apply_threshold(val_probs, 0.5)
+    val_f1_05   = micro_f1(val_labels, val_pred_05)
+    thr_result["validation_micro_f1_at_0_5"] = val_f1_05
+    thr_result["best_epoch"] = ckpt["epoch"]
+
+    THRESHOLD_PATH.write_text(json.dumps(thr_result, indent=2))
+    print(f"Threshold saved -> {THRESHOLD_PATH}")
+    print(f"  Selected threshold: {thr_result['selected_threshold']:.2f}  "
+          f"val micro-F1: {thr_result['validation_micro_f1']:.4f}")
+    print(f"  F1 at 0.5: {val_f1_05:.4f}")
+    print("\nTraining complete. Run evaluate_chemberta_mlp_faithful.py for test-set metrics.")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    args = parse_args()
+
+    features, labels, pair_index, label_map, train_ids, val_ids, test_ids = load_data()
+    print(f"Features: {features.shape}  Labels: {labels.shape}")
+    print(f"Train: {len(train_ids)}  Val: {len(val_ids)}  Test: {len(test_ids)}")
+
+    print("Validating ChemBERTa feature properties ...")
+    validate_chemberta_features(features)
+    print("  OK dtype=float32, all finite, no all-zero rows")
+
+    print("Validating artifact alignment ...")
+    validate_input_alignment(
+        features, labels, pair_index, label_map,
+        train_ids, val_ids, test_ids,
+        expected_n_features=384,
+    )
+    print("  OK alignment verified")
+
+    config = build_config(args)
+    run_full_training(features, labels, train_ids, val_ids, config, args.overwrite)
+
+
+if __name__ == "__main__":
+    main()
