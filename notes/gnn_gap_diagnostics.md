@@ -996,3 +996,79 @@ permanently as of 2026-08-17.** No further seed sweeps, retraining,
 architecture changes, or new diagnostics without an explicit new user
 request and a specific, evidence-backed hypothesis — same rule as every
 prior closure in this file.
+
+---
+
+## 2026-09-09 — REOPENED at explicit user request: `bn3` (the authors' declared-but-unused BatchNorm) + legacy env + AUC checkpoint, combined, seed sweep
+
+**Trigger:** while drafting the reproduction paper, a fresh read of the
+training log surfaced the point that had been recorded but not acted on: the
+official GNN run **never fits its own training data** — mean BCE ≈ 120 at
+epoch 1, train loss stuck at 1.44 (above the 0.693 random-guess baseline)
+after 8 epochs, train AUC 0.589. Every prior geometry/checkpoint diagnostic
+was analysing a model that never trained. Root-cause hypothesis: the encoder
+ends `conv3 → lin1` with **no normalisation and no activation**, and
+`GraphConv` sums over side-effect node degrees of 502–28,568 with no degree
+normalisation → unbounded final activations → logits in the hundreds. The
+authors' `GNN.py` *declares* `self.bn3` / `self.bn4` (`nn.BatchNorm1d`) but
+`forward()` never calls them — previously classified (correctly, against the
+released source) as dead code and omitted. Hypothesis: the released `GNN.py`
+is not the version that produced Table 5.
+
+**Diagnostic (`src/polyllm/diagnostics/gnn_final_combined.py`,
+`outputs/polyllm/gnn_final_diagnostic/`):** all three tractable untested
+variables changed at once, on one trajectory per seed —
+1. legacy env (torch 2.4.1 / PyG 2.6.1) — Diagnostic 7 tested this alone (0.41→0.60);
+2. `bn3` restored: `conv3 → bn3 → lin1` (the one surgical insertion; +256 params);
+3. validation-AUC checkpoint tracking alongside the loss-based rule.
+Graph split held fixed (seed 42); model-init / negative-sampling / loader
+seed swept over 42, 0, 1, 2. Isolated — official `outputs/polyllm/gnn/` untouched.
+
+### Result 1 — `bn3` fixes the training non-convergence. Solid, all 4 seeds.
+
+Train loss goes **0.71 → 0.54** (monotone, every epoch below the 0.693
+baseline) vs. the official run's 120 → 1.44 (never below). The scale
+explosion is gone. `bn3` is very likely the reason the released code does not
+converge; the authors clearly intended it (declared in the class).
+
+### Result 2 — but it does NOT reproduce the paper's AUC under the paper's method.
+
+| Seed | untrained (epoch 0) AUC | **patience-early-stop rule** (paper's stated criterion) | global best val-loss | best val-AUC ckpt |
+|---|---|---|---|---|
+| 42 | 0.056 | 0.663 | 0.802 | 0.938 |
+| 0  | **0.945** | 0.731 | 0.893 | 0.942 |
+| 1  | 0.717 | 0.677 | 0.676 | 0.942 |
+| 2  | **0.938** | 0.705 | 0.704 | 0.939 |
+| paper | — | — | — | AUC 0.9228 ± 0.0039, AUPRC 0.8944 ± 0.0025 |
+
+- **Under the paper's early-stopping criterion, `bn3` gives AUC 0.66–0.73** (4/4 seeds). Better than the official 0.41, still ~0.2 short. Not a reproduction.
+- **The untrained-model artefact is NOT fixed by `bn3`** — seeds 0 and 2 give an *untrained* network AUC 0.94–0.95, matching the paper before any gradient step. Same topology artefact documented 2026-08-17, still present.
+- **The ~0.94 "best val-AUC" number is that artefact, not a trained model.** Selected at epoch 1 or 3 of 10; val AUC at epoch 1 is 0.936–0.937 on *every* seed regardless of init; an untrained model reaches the same value. `bn3` bounds the activation scale so the artefact stays stable across epochs instead of being destroyed by the scale blow-up — that is why "best val-AUC" is now *consistent* (~0.94, 4/4) where before it was noisy.
+- **Run-to-run non-determinism persists:** seed 42 gave best-val-loss 0.80 here vs. 0.86 on the first (pre-sweep) run of the same script — `LinkNeighborLoader` / float32-order, already documented.
+
+### Conclusion (for the paper)
+
+The released GNN code fails to converge because it omits a BatchNorm layer it
+declares (`bn3`). Restoring it makes training converge, raising test AUC from
+0.41 to **0.66–0.73** under the paper's early-stopping criterion (4 seeds).
+The paper's reported 0.92 is reachable only by selecting a very-early-epoch
+checkpoint whose performance an **untrained** network matches on 2 of 4
+seeds. **The released code does not reproduce the reported GNN performance,
+and the reported metric on this negative-sampling protocol substantially
+reflects graph topology** (positives concentrate on high-degree side-effect
+nodes; negatives sampled uniformly) **rather than learned structure.** This
+is a stronger reproducibility finding than a clean match: a concrete
+released-code bug *plus* direct evidence (untrained model = paper's number)
+that the headline metric is partly an evaluation artefact.
+
+**Evidence:** `outputs/polyllm/gnn_final_diagnostic/results.json` (+ `seed_{0,1,2}/`),
+`training_history.csv` per seed, `checkpoints/` per seed;
+`src/polyllm/diagnostics/gnn_final_combined.py`;
+console log `outputs/polyllm/gnn_final_diagnostic_console.log`.
+
+### Frozen again
+
+GNN work re-frozen 2026-09-09. `bn3` is not adopted into the official
+`models/gnn.py` — the reproduction faithfully implements the *released* code,
+and `bn3`'s absence there is itself the finding. No further GNN runs without
+a new explicit request.
