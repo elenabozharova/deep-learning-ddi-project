@@ -1,9 +1,0 @@
-# Milestone 8 — Model Comparison Requirements
-# No new packages required beyond Milestone 6B.
-# scipy was already available (1.17.1) from the environment.
-#
-# All packages below were already installed for Milestones 6B / 7.
-scikit-learn==1.6.1
-scipy>=1.10.0
-pandas>=2.0.0
-numpy>=1.24.0

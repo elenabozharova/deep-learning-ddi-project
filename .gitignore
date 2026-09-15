@@ -18,6 +18,10 @@ __pycache__/
 /CLAUDE.md
 .claude/
 
+# Milestone-specific requirements pins -- superseded by requirements.txt,
+# kept locally for reference only
+requirements-milestone*.txt
+
 # Environment / secrets
 .env
 .env.*
